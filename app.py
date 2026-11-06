@@ -36,9 +36,10 @@ benchmark for battery degradation research. It is **free and public domain**.
 
 #### Option 1 — Original `.mat` files (recommended)
 
-1. Go to **[c3.nasa.gov/dashlink/resources/133](https://c3.nasa.gov/dashlink/resources/133/)** — the official Dashlink page
-2. Download the ZIP archive (≈ 60 MB) — it contains **B0005, B0006, B0007 and B0018**
-3. Extract and upload any `.mat` file here — the tool recognises NASA files automatically
+1. Go to **[NASA PCoE Data Set Repository](https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/)** — official NASA page
+2. Find **item #5 — Battery Data Set** and click its download link
+3. Extract the ZIP (≈ 60 MB) — it contains **B0005, B0006, B0007 and B0018**
+4. Upload any `.mat` file here — the tool recognises NASA files automatically
 
 > *Reference: B. Saha and K. Goebel (2007). Battery Data Set, NASA Ames Prognostics Center of Excellence (PCoE).*
 
