@@ -34,35 +34,23 @@ benchmark for battery degradation research. It is **free and public domain**.
 
 ---
 
-#### Option 1 — Original `.mat` files (recommended)
+#### Download the NASA dataset (free, public domain)
 
-1. Go to **[NASA PCoE Data Set Repository](https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/)** — official NASA page
-2. Find **item #5 — Battery Data Set** and click its download link
-3. Extract the ZIP (≈ 60 MB) — it contains **B0005, B0006, B0007 and B0018**
-4. Upload any `.mat` file here — the tool recognises NASA files automatically
+**👉 [Direct download — Battery Data Set ZIP (≈ 60 MB)](https://phm-datasets.s3.amazonaws.com/NASA/5.+Battery+Data+Set.zip)**
+
+The ZIP contains **B0005, B0006, B0007 and B0018** as `.mat` files.
+Extract and upload any file — the tool recognises NASA format automatically.
+
+If the direct link does not work, go to the
+[NASA PCoE Data Set Repository](https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/)
+and download **item #5 — Battery Data Set**.
 
 > *Reference: B. Saha and K. Goebel (2007). Battery Data Set, NASA Ames Prognostics Center of Excellence (PCoE).*
 
 ---
 
-#### Option 2 — Pre-converted CSV (smaller, no MATLAB needed)
-
-Go to **[IEEE DataPort — DOI 10.21227/c88e-y548](https://ieee-dataport.org/documents/nasa-ames-pcoe-ehf-calce-and-oxford)**
-and download any of:
-
-| File | Size | Battery |
-|------|------|---------|
-| `B0005_discharge.csv` | 5.5 MB | B0005 |
-| `B0006_discharge.csv` | 5.4 MB | B0006 |
-| `B0007_discharge.csv` | 5.3 MB | B0007 |
-| `B0018_discharge.csv` | 3.8 MB | B0018 |
-
-Upload the CSV directly — select **long format**, cycle column = `cycle`, voltage column = `voltage`.
-
----
-
 **About these batteries:** four 18650 Li-ion cells tested at NASA Ames until end-of-life (30% capacity fade).
-B0005, B0006 and B0007 share the same protocol; B0018 used a different protocol — a useful cross-validation case.
+B0005, B0006 and B0007 share the same test protocol; B0018 used a different protocol — a useful cross-validation case.
 """)
 
     st.subheader("Recommended CSV format — long format")
