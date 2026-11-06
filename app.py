@@ -29,21 +29,39 @@ if uploaded is None:
 
     st.subheader("🚀 Don't have battery data? Use the NASA benchmark dataset")
     st.markdown("""
-The **NASA PCoE Li-ion Battery Aging Dataset** (cells B0005, B0006, B0007) is the standard
+The **NASA PCoE Li-ion Battery Aging Dataset** (cells B0005, B0006, B0007, B0018) is the standard
 benchmark for battery degradation research. It is **free and public domain**.
 
-| Step | Action |
-|------|--------|
-| 1 | Go to [**data.nasa.gov — Li-ion Battery Aging Datasets**](https://data.nasa.gov/dataset/li-ion-battery-aging-datasets) |
-| 2 | Click the **landing page** link → Dashlink Resource 133 |
-| 3 | Download **B0005.mat** (≈ 16 MB) |
-| 4 | Upload it here — the tool recognises NASA `.mat` files automatically |
+---
 
-> *Reference: B. Saha and K. Goebel (2007). Battery Data Set, NASA Prognostics Data Repository, NASA Ames Research Center.*
+#### Option 1 — Original `.mat` files (recommended)
 
-Alternatively, pre-converted CSV versions are available on
-[IEEE DataPort (DOI 10.21227/c88e-y548)](https://ieee-dataport.org/documents/nasa-ames-pcoe-ehf-calce-and-oxford) —
-download `B0005_discharge.csv` and upload it directly.
+1. Go to **[c3.nasa.gov/dashlink/resources/133](https://c3.nasa.gov/dashlink/resources/133/)** — the official Dashlink page
+2. Download the ZIP archive (≈ 60 MB) — it contains **B0005, B0006, B0007 and B0018**
+3. Extract and upload any `.mat` file here — the tool recognises NASA files automatically
+
+> *Reference: B. Saha and K. Goebel (2007). Battery Data Set, NASA Ames Prognostics Center of Excellence (PCoE).*
+
+---
+
+#### Option 2 — Pre-converted CSV (smaller, no MATLAB needed)
+
+Go to **[IEEE DataPort — DOI 10.21227/c88e-y548](https://ieee-dataport.org/documents/nasa-ames-pcoe-ehf-calce-and-oxford)**
+and download any of:
+
+| File | Size | Battery |
+|------|------|---------|
+| `B0005_discharge.csv` | 5.5 MB | B0005 |
+| `B0006_discharge.csv` | 5.4 MB | B0006 |
+| `B0007_discharge.csv` | 5.3 MB | B0007 |
+| `B0018_discharge.csv` | 3.8 MB | B0018 |
+
+Upload the CSV directly — select **long format**, cycle column = `cycle`, voltage column = `voltage`.
+
+---
+
+**About these batteries:** four 18650 Li-ion cells tested at NASA Ames until end-of-life (30% capacity fade).
+B0005, B0006 and B0007 share the same protocol; B0018 used a different protocol — a useful cross-validation case.
 """)
 
     st.subheader("Recommended CSV format — long format")
@@ -180,5 +198,3 @@ if "deltiet_result" in st.session_state:
 - For scientific comparison, keep the same preprocessing and record the parameters.
 """)
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
-
-                  
