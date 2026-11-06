@@ -26,6 +26,26 @@ st.warning("Version 1.0 experimental. The result is a mathematical signal for in
 uploaded = st.file_uploader("Choose a data file", type=["mat", "csv", "xlsx", "xls"])
 if uploaded is None:
     st.info("Start by uploading a file. For CSV/Excel, use one row per voltage sample with a column identifying the cycle (long format), or one row per cycle with multiple voltage columns (wide format).")
+
+    st.subheader("🚀 Don't have battery data? Use the NASA benchmark dataset")
+    st.markdown("""
+The **NASA PCoE Li-ion Battery Aging Dataset** (cells B0005, B0006, B0007) is the standard
+benchmark for battery degradation research. It is **free and public domain**.
+
+| Step | Action |
+|------|--------|
+| 1 | Go to [**data.nasa.gov — Li-ion Battery Aging Datasets**](https://data.nasa.gov/dataset/li-ion-battery-aging-datasets) |
+| 2 | Click the **landing page** link → Dashlink Resource 133 |
+| 3 | Download **B0005.mat** (≈ 16 MB) |
+| 4 | Upload it here — the tool recognises NASA `.mat` files automatically |
+
+> *Reference: B. Saha and K. Goebel (2007). Battery Data Set, NASA Prognostics Data Repository, NASA Ames Research Center.*
+
+Alternatively, pre-converted CSV versions are available on
+[IEEE DataPort (DOI 10.21227/c88e-y548)](https://ieee-dataport.org/documents/nasa-ames-pcoe-ehf-calce-and-oxford) —
+download `B0005_discharge.csv` and upload it directly.
+""")
+
     st.subheader("Recommended CSV format — long format")
     st.code("cycle,voltage,capacity_Ah\\n1,4.18,2.05\\n1,4.16,2.05\\n1,4.12,2.05\\n2,4.17,2.03\\n2,4.14,2.03", language="csv")
     st.stop()
@@ -160,3 +180,5 @@ if "deltiet_result" in st.session_state:
 - For scientific comparison, keep the same preprocessing and record the parameters.
 """)
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
+
+                  
