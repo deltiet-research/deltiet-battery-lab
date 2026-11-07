@@ -218,90 +218,89 @@ def _try_auto_csv(raw_df):
 def extract_empa_bdf_csv(file_bytes):
     """Parse Battery Data Alliance BDF CSV files (EMPA / BioLogic).
 
-    Battery Data Format column names (snake_case):
-      voltage_volt        — cell voltage
-      current_ampere      — current in A (negative = discharge)
-      cycle_index         — integer cycle (0-based)
-      half_cycle_index    — 0=charge, 1=discharge, 2=rest
-      charge_capacity_ampere_hour  / discharge_capacity_ampere_hour
-    Also handles legacy slash-notation: Ecell/V, I/mA, cycle number.
+    Detects BDF by presence of 'voltage_volt' column.
+    Cycles are identified via half_cycle_index (1=discharge) when available,
+    or via current sign (I < 0) otherwise.
+    No explicit cycle_index column required.
     """
     import io as _io
     df = pd.read_csv(_io.BytesIO(file_bytes))
     df.columns = df.columns.str.strip()
+    cols_lower = {c.lower(): c for c in df.columns}
 
-    col_map = {}
-    for c in df.columns:
-        cl = c.lower().replace(" ", "_").replace("/", "_")
-        # voltage
-        if cl in ("voltage_volt", "ecell_v", "e_v", "ewe_v", "voltage"):
-            col_map.setdefault("voltage", c)
-        # current
-        if cl in ("current_ampere", "i_a"):
-            col_map.setdefault("current_a", c)
-        if cl in ("current_milliampere", "i_ma"):
-            col_map.setdefault("current_ma", c)
-        # cycle index
-        if cl in ("cycle_index", "cycle_number", "cycle"):
-            col_map.setdefault("cycle", c)
-        # half-cycle (0=chg, 1=dis, 2=rest)
-        if cl in ("half_cycle_index", "half_cycle"):
-            col_map.setdefault("half_cycle", c)
-        # capacity
-        if "discharge_capacity" in cl and "ampere_hour" in cl:
-            col_map.setdefault("cap_ah", c)
-        if "q_discharge" in cl or "qdischarge" in cl:
-            col_map.setdefault("cap_mah", c)
+    # --- require voltage_volt as BDF fingerprint ---
+    v_col = cols_lower.get("voltage_volt") or cols_lower.get("ecell/v") or cols_lower.get("e/v")
+    if v_col is None:
+        raise ValueError("No BDF voltage column (voltage_volt) found.")
 
-    if "voltage" not in col_map or "cycle" not in col_map:
-        raise ValueError(
-            f"BDF columns not detected. Found: {list(df.columns[:10])}"
-        )
-
-    v_col  = col_map["voltage"]
-    cy_col = col_map["cycle"]
-
-    # Build current column in A
-    if "current_a" in col_map:
-        df["_I_A"] = pd.to_numeric(df[col_map["current_a"]], errors="coerce")
-    elif "current_ma" in col_map:
-        df["_I_A"] = pd.to_numeric(df[col_map["current_ma"]], errors="coerce") / 1000
+    # --- current column ---
+    i_col_a  = cols_lower.get("current_ampere")
+    i_col_ma = cols_lower.get("current_milliampere") or cols_lower.get("current/ma")
+    if i_col_a:
+        df["_I_A"] = pd.to_numeric(df[i_col_a], errors="coerce")
+    elif i_col_ma:
+        df["_I_A"] = pd.to_numeric(df[i_col_ma], errors="coerce") / 1000.0
     else:
         df["_I_A"] = np.nan
 
-    # Select discharge rows
-    if "half_cycle" in col_map:
-        # half_cycle_index == 1 means discharge in BDF
-        dis = df[pd.to_numeric(df[col_map["half_cycle"]], errors="coerce") == 1].copy()
-    elif df["_I_A"].notna().any():
+    # --- half_cycle_index: 1 = discharge ---
+    hc_col = cols_lower.get("half_cycle_index") or cols_lower.get("half_cycle")
+
+    # --- capacity ---
+    cap_col = cols_lower.get("discharge_capacity_ampere_hour")
+
+    # --- explicit cycle column (optional) ---
+    cy_col = (cols_lower.get("cycle_index") or cols_lower.get("cycle_number")
+              or cols_lower.get("cycle_dimensionless") or cols_lower.get("cycle"))
+
+    # --- select discharge rows ---
+    if hc_col:
+        mask = pd.to_numeric(df[hc_col], errors="coerce") == 1
+        dis = df[mask].copy()
+    elif df["_I_A"].notna().sum() > 10:
         dis = df[df["_I_A"] < -1e-6].copy()
     else:
         dis = df.copy()
 
-    dis[cy_col] = pd.to_numeric(dis[cy_col], errors="coerce")
-    dis = dis.dropna(subset=[cy_col, v_col])
-    dis[cy_col] = dis[cy_col].astype(int)
+    if dis.empty:
+        raise ValueError("BDF: no discharge rows identified.")
+
+    # --- assign cycle numbers ---
+    if cy_col and cy_col in dis.columns:
+        dis["_cyc"] = pd.to_numeric(dis[cy_col], errors="coerce").fillna(-1).astype(int)
+    elif hc_col:
+        # Each contiguous block of half_cycle==1 is one discharge
+        full_hc = pd.to_numeric(df[hc_col], errors="coerce")
+        is_dis  = (full_hc == 1).astype(int)
+        blk     = (is_dis.diff().fillna(0) == 1).cumsum()
+        dis["_cyc"] = blk[dis.index].values
+    else:
+        # Segment by current sign reversals
+        sign = (df["_I_A"] < -1e-6).astype(int)
+        blk  = (sign.diff().fillna(0) == 1).cumsum()
+        dis["_cyc"] = blk[dis.index].values
+
+    dis = dis.dropna(subset=["_cyc"])
+    dis["_cyc"] = dis["_cyc"].astype(int)
 
     ids, curves, caps = [], [], []
-    for cyc_id, grp in dis.groupby(cy_col, sort=True):
+    for cyc_id, grp in dis.groupby("_cyc", sort=True):
         v = pd.to_numeric(grp[v_col], errors="coerce").dropna().values
         if len(v) < 20:
             continue
-        if "cap_ah" in col_map:
-            cap = float(pd.to_numeric(grp[col_map["cap_ah"]], errors="coerce").abs().max())
-        elif "cap_mah" in col_map:
-            cap = float(pd.to_numeric(grp[col_map["cap_mah"]], errors="coerce").abs().max()) / 1000
+        if cap_col:
+            cap = float(pd.to_numeric(grp[cap_col], errors="coerce").abs().max())
         else:
             cap = np.nan
-        ids.append(cyc_id + 1)   # convert 0-based to 1-based
+        ids.append(len(ids) + 1)   # 1-based sequential cycle number
         curves.append(v)
         caps.append(cap)
 
     if len(ids) < 3:
         raise ValueError(
-            f"BDF: only {len(ids)} discharge cycles found. "
-            f"cycle col='{cy_col}', voltage col='{v_col}', "
-            f"half_cycle col={col_map.get('half_cycle','none')}"
+            f"BDF: only {len(ids)} discharge cycles. "
+            f"voltage='{v_col}', hc='{hc_col}', cycle='{cy_col}'. "
+            f"Columns: {list(df.columns[:12])}"
         )
     return ids, curves, caps, "EMPA-BDF"
 
@@ -631,4 +630,4 @@ if "deltiet_result" in st.session_state:
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
 
 
-        
+               
