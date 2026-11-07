@@ -216,57 +216,66 @@ def _try_auto_csv(raw_df):
 
 
 def extract_empa_bdf_csv(file_bytes):
-    """Parse EMPA / Battery Data Alliance BDF CSV files.
+    """Parse Battery Data Alliance BDF CSV files (EMPA / BioLogic).
 
-    Column names follow the BDF schema:
-      Ecell/V  (or E/V)  — cell voltage
-      I/mA     (or I/A)  — current (negative = discharge for BioLogic)
-      cycle number       — integer cycle index
-      Q discharge/mAh    — cumulative discharge capacity per half-cycle
+    Battery Data Format column names (snake_case):
+      voltage_volt        — cell voltage
+      current_ampere      — current in A (negative = discharge)
+      cycle_index         — integer cycle (0-based)
+      half_cycle_index    — 0=charge, 1=discharge, 2=rest
+      charge_capacity_ampere_hour  / discharge_capacity_ampere_hour
+    Also handles legacy slash-notation: Ecell/V, I/mA, cycle number.
     """
     import io as _io
     df = pd.read_csv(_io.BytesIO(file_bytes))
     df.columns = df.columns.str.strip()
 
-    # Normalise column names
     col_map = {}
     for c in df.columns:
-        cl = c.lower().replace(" ", "").replace("/", "_").replace("°", "")
-        if cl in ("ecell_v", "e_v", "ewe_v"):
-            col_map["voltage"] = c
-        elif cl in ("i_ma",):
-            col_map["current_ma"] = c
-        elif cl in ("i_a",):
-            col_map["current_a"] = c
-        elif "cycle" in cl and "number" in cl:
-            col_map["cycle"] = c
-        elif "qdischarge" in cl or "q_discharge" in cl:
-            col_map["qdis"] = c
+        cl = c.lower().replace(" ", "_").replace("/", "_")
+        # voltage
+        if cl in ("voltage_volt", "ecell_v", "e_v", "ewe_v", "voltage"):
+            col_map.setdefault("voltage", c)
+        # current
+        if cl in ("current_ampere", "i_a"):
+            col_map.setdefault("current_a", c)
+        if cl in ("current_milliampere", "i_ma"):
+            col_map.setdefault("current_ma", c)
+        # cycle index
+        if cl in ("cycle_index", "cycle_number", "cycle"):
+            col_map.setdefault("cycle", c)
+        # half-cycle (0=chg, 1=dis, 2=rest)
+        if cl in ("half_cycle_index", "half_cycle"):
+            col_map.setdefault("half_cycle", c)
+        # capacity
+        if "discharge_capacity" in cl and "ampere_hour" in cl:
+            col_map.setdefault("cap_ah", c)
+        if "q_discharge" in cl or "qdischarge" in cl:
+            col_map.setdefault("cap_mah", c)
 
     if "voltage" not in col_map or "cycle" not in col_map:
         raise ValueError(
-            f"BDF columns not found. Available: {list(df.columns)}"
+            f"BDF columns not detected. Found: {list(df.columns[:10])}"
         )
 
     v_col  = col_map["voltage"]
     cy_col = col_map["cycle"]
 
-    # Current column — convert to mA if needed
-    if "current_ma" in col_map:
-        i_col = col_map["current_ma"]
-        df["_I_mA"] = df[i_col].astype(float)
-    elif "current_a" in col_map:
-        i_col = col_map["current_a"]
-        df["_I_mA"] = df[i_col].astype(float) * 1000
+    # Build current column in A
+    if "current_a" in col_map:
+        df["_I_A"] = pd.to_numeric(df[col_map["current_a"]], errors="coerce")
+    elif "current_ma" in col_map:
+        df["_I_A"] = pd.to_numeric(df[col_map["current_ma"]], errors="coerce") / 1000
     else:
-        # Infer from voltage sign — fallback
-        df["_I_mA"] = np.nan
+        df["_I_A"] = np.nan
 
-    # Keep only discharge rows (I < 0 in BioLogic convention)
-    if df["_I_mA"].notna().any():
-        dis = df[df["_I_mA"] < -0.001].copy()
+    # Select discharge rows
+    if "half_cycle" in col_map:
+        # half_cycle_index == 1 means discharge in BDF
+        dis = df[pd.to_numeric(df[col_map["half_cycle"]], errors="coerce") == 1].copy()
+    elif df["_I_A"].notna().any():
+        dis = df[df["_I_A"] < -1e-6].copy()
     else:
-        # No current column — use half-cycle or just take all rows
         dis = df.copy()
 
     dis[cy_col] = pd.to_numeric(dis[cy_col], errors="coerce")
@@ -275,22 +284,24 @@ def extract_empa_bdf_csv(file_bytes):
 
     ids, curves, caps = [], [], []
     for cyc_id, grp in dis.groupby(cy_col, sort=True):
-        v = grp[v_col].astype(float).values
-        v = v[np.isfinite(v)]
+        v = pd.to_numeric(grp[v_col], errors="coerce").dropna().values
         if len(v) < 20:
             continue
-        if "qdis" in col_map:
-            cap = float(grp[col_map["qdis"]].abs().max())
+        if "cap_ah" in col_map:
+            cap = float(pd.to_numeric(grp[col_map["cap_ah"]], errors="coerce").abs().max())
+        elif "cap_mah" in col_map:
+            cap = float(pd.to_numeric(grp[col_map["cap_mah"]], errors="coerce").abs().max()) / 1000
         else:
             cap = np.nan
-        ids.append(cyc_id)
+        ids.append(cyc_id + 1)   # convert 0-based to 1-based
         curves.append(v)
         caps.append(cap)
 
     if len(ids) < 3:
         raise ValueError(
-            f"BDF parse: only {len(ids)} discharge cycles found — "
-            "check current sign or column names."
+            f"BDF: only {len(ids)} discharge cycles found. "
+            f"cycle col='{cy_col}', voltage col='{v_col}', "
+            f"half_cycle col={col_map.get('half_cycle','none')}"
         )
     return ids, curves, caps, "EMPA-BDF"
 
@@ -454,10 +465,16 @@ try:
                 _bdf_ok = True
             except Exception:
                 pass
-            if not _bdf_ok:
-                raw = pd.read_csv(uploaded)
-            else:
-                raw = None          # BDF already parsed — skip raw block
+            if _bdf_ok:
+                # Go straight to Run — no column-config UI needed
+                st.info(f"Valid cycles: {len(ids)} | First cycle: {ids[0]} | Last cycle: {ids[-1]}")
+                if st.button("▶ Run Delt-IEt", key="bdf_run", type="primary", use_container_width=True):
+                    result = analyze_curves(curves, ids, caps, int(window_norm), int(percentile))
+                    st.session_state["deltiet_result"] = result
+                    st.session_state["deltiet_source"] = uploaded.name
+                    st.session_state["deltiet_params"] = (int(window_norm), int(percentile))
+                st.stop()
+            raw = pd.read_csv(uploaded)
         else:
             # CALCE Arbin Excel files have metadata rows before the real header.
             # Try header rows 0-5; pick the first one that gives named columns
