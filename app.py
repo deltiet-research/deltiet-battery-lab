@@ -215,6 +215,86 @@ def _try_auto_csv(raw_df):
     return None
 
 
+def extract_empa_bdf_csv(file_bytes):
+    """Parse EMPA / Battery Data Alliance BDF CSV files.
+
+    Column names follow the BDF schema:
+      Ecell/V  (or E/V)  — cell voltage
+      I/mA     (or I/A)  — current (negative = discharge for BioLogic)
+      cycle number       — integer cycle index
+      Q discharge/mAh    — cumulative discharge capacity per half-cycle
+    """
+    import io as _io
+    df = pd.read_csv(_io.BytesIO(file_bytes))
+    df.columns = df.columns.str.strip()
+
+    # Normalise column names
+    col_map = {}
+    for c in df.columns:
+        cl = c.lower().replace(" ", "").replace("/", "_").replace("°", "")
+        if cl in ("ecell_v", "e_v", "ewe_v"):
+            col_map["voltage"] = c
+        elif cl in ("i_ma",):
+            col_map["current_ma"] = c
+        elif cl in ("i_a",):
+            col_map["current_a"] = c
+        elif "cycle" in cl and "number" in cl:
+            col_map["cycle"] = c
+        elif "qdischarge" in cl or "q_discharge" in cl:
+            col_map["qdis"] = c
+
+    if "voltage" not in col_map or "cycle" not in col_map:
+        raise ValueError(
+            f"BDF columns not found. Available: {list(df.columns)}"
+        )
+
+    v_col  = col_map["voltage"]
+    cy_col = col_map["cycle"]
+
+    # Current column — convert to mA if needed
+    if "current_ma" in col_map:
+        i_col = col_map["current_ma"]
+        df["_I_mA"] = df[i_col].astype(float)
+    elif "current_a" in col_map:
+        i_col = col_map["current_a"]
+        df["_I_mA"] = df[i_col].astype(float) * 1000
+    else:
+        # Infer from voltage sign — fallback
+        df["_I_mA"] = np.nan
+
+    # Keep only discharge rows (I < 0 in BioLogic convention)
+    if df["_I_mA"].notna().any():
+        dis = df[df["_I_mA"] < -0.001].copy()
+    else:
+        # No current column — use half-cycle or just take all rows
+        dis = df.copy()
+
+    dis[cy_col] = pd.to_numeric(dis[cy_col], errors="coerce")
+    dis = dis.dropna(subset=[cy_col, v_col])
+    dis[cy_col] = dis[cy_col].astype(int)
+
+    ids, curves, caps = [], [], []
+    for cyc_id, grp in dis.groupby(cy_col, sort=True):
+        v = grp[v_col].astype(float).values
+        v = v[np.isfinite(v)]
+        if len(v) < 20:
+            continue
+        if "qdis" in col_map:
+            cap = float(grp[col_map["qdis"]].abs().max())
+        else:
+            cap = np.nan
+        ids.append(cyc_id)
+        curves.append(v)
+        caps.append(cap)
+
+    if len(ids) < 3:
+        raise ValueError(
+            f"BDF parse: only {len(ids)} discharge cycles found — "
+            "check current sign or column names."
+        )
+    return ids, curves, caps, "EMPA-BDF"
+
+
 def extract_mendeley_mat(file_bytes, cell_index=0):
     """Parse Mendeley Dataset5 (MATLAB v7.3 / HDF5).
 
@@ -366,7 +446,18 @@ try:
         st.success(f"HDF5 file recognized: cell {battery_name} — {len(curves)} discharge cycles (dynamic protocol).")
     else:
         if uploaded.name.lower().endswith(".csv"):
-            raw = pd.read_csv(uploaded)
+            # Try EMPA BDF CSV first (BioLogic / Battery Data Alliance format)
+            _bdf_ok = False
+            try:
+                ids, curves, caps, battery_name = extract_empa_bdf_csv(uploaded.getvalue())
+                st.success(f"EMPA BDF (BioLogic): {battery_name} — {len(curves)} discharge cycles.")
+                _bdf_ok = True
+            except Exception:
+                pass
+            if not _bdf_ok:
+                raw = pd.read_csv(uploaded)
+            else:
+                raw = None          # BDF already parsed — skip raw block
         else:
             # CALCE Arbin Excel files have metadata rows before the real header.
             # Try header rows 0-5; pick the first one that gives named columns
@@ -384,12 +475,12 @@ try:
                     pass
             if raw is None:
                 raw = pd.read_excel(uploaded, header=0)  # fallback
-        if raw.empty:
+        if raw is not None and raw.empty:
             st.error("The file is empty.")
             st.stop()
 
-        # Try auto-detect known formats first
-        auto = _try_auto_csv(raw)
+        # Try auto-detect known formats first (skip if BDF already parsed)
+        auto = _try_auto_csv(raw) if raw is not None else None
         if auto is not None:
             ids, curves, caps, battery_name, _desc = auto
             st.success(f"Format auto-recognized: {_desc}")
@@ -522,4 +613,4 @@ if "deltiet_result" in st.session_state:
 """)
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
 
-       
+         
