@@ -141,43 +141,111 @@ def _try_auto_csv(raw_df):
         if len(curves) >= 3:
             return ids, curves, caps, "RWTH cell", f"RWTH Aachen CSV — {len(curves)} discharge cycles (NMC)."
 
+    # --- Real-world multi-cell pack format ---
+    # Columns: vol_1..vol_8, temp_1..temp_8, cur
+    # Wide time-series: each row = one time sample, 8 cells measured simultaneously
+    # Sign convention: cur > 0 = discharge, cur < 0 = charge
+    vol_cols = [col_map[c] for c in cols_lower if c.startswith("vol_") and c[4:].isdigit()]
+    cur_col  = col_map.get("cur", None)
+    if len(vol_cols) >= 1 and cur_col is not None:
+        # Use vol_1 (first cell) as representative voltage
+        v_arr = pd.to_numeric(raw_df[vol_cols[0]], errors="coerce").to_numpy(dtype=float)
+        i_arr = pd.to_numeric(raw_df[cur_col], errors="coerce").fillna(0).to_numpy(dtype=float)
+        # Discharge: cur > threshold (positive current = discharging in this convention)
+        dis_thresh = max(1.0, np.percentile(np.abs(i_arr[np.abs(i_arr) > 0.5]), 10)) if np.any(np.abs(i_arr) > 0.5) else 1.0
+        is_discharge = i_arr > dis_thresh
+        starts = np.where(~is_discharge[:-1] & is_discharge[1:])[0] + 1
+        ends   = np.where(is_discharge[:-1] & ~is_discharge[1:])[0] + 1
+        if len(starts) == 0:
+            return None
+        if len(ends) == 0 or ends[0] < starts[0]:
+            ends = np.append(ends, len(i_arr))
+        if ends[-1] < starts[-1]:
+            ends = np.append(ends, len(i_arr))
+        ids, curves, caps = [], [], []
+        for s, e in zip(starts, ends):
+            v_seg = v_arr[s:e]
+            v_seg = v_seg[~np.isnan(v_seg)]
+            if len(v_seg) < 10:
+                continue
+            ids.append(len(ids) + 1)
+            curves.append(v_seg)
+            caps.append(abs(float(np.trapz(i_arr[s:e]))) / 3600.0)
+        if len(curves) >= 3:
+            n_cells = len(vol_cols)
+            return ids, curves, caps, f"Pack ({n_cells} cells)", \
+                   f"Multi-cell pack CSV — {len(curves)} discharge cycles, {n_cells} cells (LFP/real-world)."
+
     return None
 
 
 def extract_galijatovic_h5(file_bytes):
-    """Extract discharge cycles from Galijatovic 2023 HDF5 format."""
+    """Extract discharge cycles from Galijatovic 2023 HDF5 format.
+
+    Strategy: each test block may contain multiple full charge-discharge cycles
+    identified by resets in the 'dischargecap' column.  Dynamic-protocol blocks
+    have many small current pulses; we only count a reset as a new cycle boundary
+    when the preceding segment discharged at least MIN_CAP_AH ampere-hours —
+    this filters out micro-pulse artefacts that previously inflated the count
+    to tens-of-thousands of false cycles.
+    """
     import h5py, tempfile, os
+    MIN_CAP_AH = 0.3   # Panasonic NCR18650B nominal ~3.4 Ah; require ≥30% per cycle
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         tmp.write(file_bytes)
         tmp_path = tmp.name
     try:
         ids, curves, caps = [], [], []
         with h5py.File(tmp_path, 'r') as f:
-            info = f['info'][:]
-            cell_id = info['idcell'][0].decode('utf-8') if len(info) > 0 else "unknown"
+            # Read cell identifier from metadata
+            try:
+                info = f['info'][:]
+                cell_id = info['idcell'][0].decode('utf-8') if len(info) > 0 else "unknown"
+            except Exception:
+                cell_id = "unknown"
+
             tests = sorted(f['tests'].keys())
-            big_tests = [t for t in tests if f['tests'][t]['voltage'].shape[0] > 10000]
             cycle_num = 0
-            for t in big_tests:
-                dc = f['tests'][t]['dischargecap'][:]
-                v  = f['tests'][t]['voltage'][:]
-                resets = np.where((dc[1:] < 0.001) & (dc[:-1] > 0.01))[0] + 1
-                boundaries = np.concatenate([[0], resets, [len(dc)]])
-                for i in range(len(boundaries)-1):
-                    s, e = boundaries[i], boundaries[i+1]
+
+            for t in tests:
+                grp = f['tests'][t]
+                n = grp['voltage'].shape[0]
+                if n < 100:          # skip tiny/corrupt blocks
+                    continue
+
+                dc = grp['dischargecap'][:]
+                v  = grp['voltage'][:]
+
+                # Detect cycle boundaries: dischargecap drops from ≥MIN_CAP_AH to near 0
+                # (a "real" full-cycle reset, not a micropulse artefact)
+                prev_large = dc[:-1] >= MIN_CAP_AH
+                next_small = dc[1:]  < 0.05
+                reset_idx  = np.where(prev_large & next_small)[0] + 1
+                boundaries = np.concatenate([[0], reset_idx, [n]])
+
+                for i in range(len(boundaries) - 1):
+                    s, e = int(boundaries[i]), int(boundaries[i+1])
                     seg_dc = dc[s:e]
-                    discharge_idx = np.where(seg_dc > 0.001)[0]
-                    if len(discharge_idx) < 10:
+                    max_cap = float(seg_dc.max())
+
+                    if max_cap < MIN_CAP_AH:   # partial / rest segment — skip
                         continue
-                    ds = discharge_idx[0] + s
-                    de = discharge_idx[-1] + s
+
+                    # Isolate the discharge portion (dischargecap actively increasing)
+                    increasing = np.where(np.diff(seg_dc) > 1e-5)[0]
+                    if len(increasing) < 20:
+                        continue
+                    ds = int(increasing[0])  + s
+                    de = int(increasing[-1]) + s + 1
                     v_curve = v[ds:de].astype(float)
-                    if len(v_curve) < 10:
+                    if len(v_curve) < 20:
                         continue
+
                     cycle_num += 1
                     ids.append(cycle_num)
                     curves.append(v_curve)
-                    caps.append(float(seg_dc.max()))
+                    caps.append(max_cap)
+
         return ids, curves, caps, cell_id
     finally:
         os.unlink(tmp_path)
