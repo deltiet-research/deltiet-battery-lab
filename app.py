@@ -23,44 +23,81 @@ Shannon entropy for each voltage curve and applies the Delt-IEt engine.
 """)
 st.warning("Version 1.0 experimental. The result is a mathematical signal for investigation; it is not a certified diagnostic or a guaranteed failure prediction.")
 
-uploaded = st.file_uploader("Choose a data file", type=["mat", "csv", "xlsx", "xls"])
+uploaded = st.file_uploader("Choose a data file", type=["mat", "h5", "hdf5", "csv", "xlsx", "xls"])
 if uploaded is None:
     st.info("Start by uploading a file. For CSV/Excel, use one row per voltage sample with a column identifying the cycle (long format), or one row per cycle with multiple voltage columns (wide format).")
 
-    st.subheader("🚀 Don't have battery data? Use the NASA benchmark dataset")
+    st.subheader("🚀 Don't have battery data? Use one of these free datasets")
     st.markdown("""
-The **NASA PCoE Li-ion Battery Aging Dataset** (cells B0005, B0006, B0007, B0018) is the standard
-benchmark for battery degradation research. It is **free and public domain**.
-
----
-
-#### Download the NASA dataset (free, public domain)
+#### 1 · NASA PCoE — constant-current protocol (cells B0005, B0006, B0007, B0018)
 
 **👉 [Direct download — Battery Data Set ZIP (≈ 60 MB)](https://phm-datasets.s3.amazonaws.com/NASA/5.+Battery+Data+Set.zip)**
 
-The ZIP contains **B0005, B0006, B0007 and B0018** as `.mat` files.
-Extract and upload any file — the tool recognises NASA format automatically.
+`.mat` files. Extract and upload any — the tool recognises NASA format automatically.
 
-If the direct link does not work, go to the
-[NASA PCoE Data Set Repository](https://www.nasa.gov/intelligent-systems-division/discovery-and-systems-health/pcoe/pcoe-data-set-repository/)
-and download **item #5 — Battery Data Set**.
-
-> *Reference: B. Saha and K. Goebel (2007). Battery Data Set, NASA Ames Prognostics Center of Excellence (PCoE).*
+> *B. Saha and K. Goebel (2007). Battery Data Set, NASA Ames PCoE.*
 
 ---
 
-**About these batteries:** four 18650 Li-ion cells tested at NASA Ames until end-of-life (30% capacity fade).
-B0005, B0006 and B0007 share the same test protocol; B0018 used a different protocol — a useful cross-validation case.
+#### 2 · Galijatovic 2023 — dynamic load profiles, 116 cells, 37 protocols (Panasonic NCR18650B)
+
+**👉 [Download individual cells from Zenodo](https://zenodo.org/records/7896429)**
+
+`.h5` files (~36–520 MB each). Upload any `2_XXX.h5` — the tool reads the format automatically.
+
+> *Galijatovic et al. (2023). Ageing Data of Lithium-ion Panasonic NCR18650B Battery Cells. Zenodo.*
 """)
 
     st.subheader("Recommended CSV format — long format")
     st.code("cycle,voltage,capacity_Ah\\n1,4.18,2.05\\n1,4.16,2.05\\n1,4.12,2.05\\n2,4.17,2.03\\n2,4.14,2.03", language="csv")
     st.stop()
 
+def extract_galijatovic_h5(file_bytes):
+    """Extract discharge cycles from Galijatovic 2023 HDF5 format."""
+    import h5py, tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        ids, curves, caps = [], [], []
+        with h5py.File(tmp_path, 'r') as f:
+            info = f['info'][:]
+            cell_id = info['idcell'][0].decode('utf-8') if len(info) > 0 else "unknown"
+            tests = sorted(f['tests'].keys())
+            big_tests = [t for t in tests if f['tests'][t]['voltage'].shape[0] > 10000]
+            cycle_num = 0
+            for t in big_tests:
+                dc = f['tests'][t]['dischargecap'][:]
+                v  = f['tests'][t]['voltage'][:]
+                resets = np.where((dc[1:] < 0.001) & (dc[:-1] > 0.01))[0] + 1
+                boundaries = np.concatenate([[0], resets, [len(dc)]])
+                for i in range(len(boundaries)-1):
+                    s, e = boundaries[i], boundaries[i+1]
+                    seg_dc = dc[s:e]
+                    discharge_idx = np.where(seg_dc > 0.001)[0]
+                    if len(discharge_idx) < 10:
+                        continue
+                    ds = discharge_idx[0] + s
+                    de = discharge_idx[-1] + s
+                    v_curve = v[ds:de].astype(float)
+                    if len(v_curve) < 10:
+                        continue
+                    cycle_num += 1
+                    ids.append(cycle_num)
+                    curves.append(v_curve)
+                    caps.append(float(seg_dc.max()))
+        return ids, curves, caps, cell_id
+    finally:
+        os.unlink(tmp_path)
+
 try:
-    if uploaded.name.lower().endswith(".mat"):
+    fname = uploaded.name.lower()
+    if fname.endswith(".mat"):
         ids, curves, caps, battery_name = extract_nasa_mat(io.BytesIO(uploaded.getvalue()))
         st.success(f"NASA file recognized: {battery_name} — {len(curves)} discharge cycles.")
+    elif fname.endswith(".h5") or fname.endswith(".hdf5"):
+        ids, curves, caps, battery_name = extract_galijatovic_h5(uploaded.getvalue())
+        st.success(f"HDF5 file recognized: cell {battery_name} — {len(curves)} discharge cycles (dynamic protocol).")
     else:
         if uploaded.name.lower().endswith(".csv"):
             raw = pd.read_csv(uploaded)
