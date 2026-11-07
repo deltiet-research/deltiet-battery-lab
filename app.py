@@ -46,11 +46,103 @@ if uploaded is None:
 `.h5` files (~36–520 MB each). Upload any `2_XXX.h5` — the tool reads the format automatically.
 
 > *Galijatovic et al. (2023). Ageing Data of Lithium-ion Panasonic NCR18650B Battery Cells. Zenodo.*
+
+---
+
+#### 3 · RWTH Aachen 2021 — NMC/graphite, 48 cells (Sanyo/Panasonic UR18650E), Germany
+
+**👉 [Download Rawdata.zip (~80 MB)](https://publications.rwth-aachen.de/record/818642/files/Rawdata.zip)**
+
+ZIP contains individual `.csv` files, one per cell. Extract any single CSV and upload — the tool auto-detects RWTH format.
+
+> *Li et al. (2021). Time-series cyclic aging data on 48 commercial NMC/graphite cells. RWTH Aachen.*
+
+---
+
+#### 4 · Tongji University / KIT 2022 — NCA & NCM, 18650 cells, China + Germany
+
+**👉 [Download NCM+NCA ZIP (356 MB)](https://zenodo.org/records/6405084/files/Dataset_3_NCM_NCA_battery.zip?download=1)**
+
+ZIP contains individual `.csv` files per cell (`CYX-Y_Z-#N.csv`). Extract any CSV and upload — the tool auto-detects Tongji format.
+
+> *Che et al. (2022). Data-driven capacity estimation of commercial lithium-ion batteries. Nature Communications.*
 """)
 
     st.subheader("Recommended CSV format — long format")
     st.code("cycle,voltage,capacity_Ah\\n1,4.18,2.05\\n1,4.16,2.05\\n1,4.12,2.05\\n2,4.17,2.03\\n2,4.14,2.03", language="csv")
     st.stop()
+
+def _try_auto_csv(raw_df):
+    """
+    Try to auto-parse known raw CSV formats (no manual column mapping needed).
+    Returns (ids, curves, caps, battery_name, description) or None if unrecognized.
+    """
+    cols_lower = [str(c).lower().strip() for c in raw_df.columns]
+    col_map = {c_low: c_orig for c_low, c_orig in zip(cols_lower, raw_df.columns)}
+
+    # --- Tongji / KIT format ---
+    # Columns: time/s, control/V/mA, Ecell/V, <I>/mA, Q discharge/mA.h, Q charge/mA.h
+    tongji_v = next((col_map[c] for c in cols_lower if "ecell" in c), None)
+    tongji_q = next((col_map[c] for c in cols_lower if "q discharge" in c or "qdischarge" in c), None)
+    if tongji_v is not None and tongji_q is not None:
+        v_arr = pd.to_numeric(raw_df[tongji_v], errors="coerce").to_numpy(dtype=float)
+        q_arr = pd.to_numeric(raw_df[tongji_q], errors="coerce").fillna(0).to_numpy(dtype=float)
+        # Cycle boundaries: Q_discharge resets (drops from >0.5 to <0.1 mAh)
+        resets = np.where((q_arr[1:] < 0.1) & (q_arr[:-1] > 0.5))[0] + 1
+        boundaries = np.concatenate([[0], resets, [len(q_arr)]])
+        ids, curves, caps = [], [], []
+        for i in range(len(boundaries) - 1):
+            s, e = boundaries[i], boundaries[i + 1]
+            q_seg = q_arr[s:e]
+            discharge_idx = np.where(q_seg > 0.1)[0]
+            if len(discharge_idx) < 10:
+                continue
+            v_seg = v_arr[s + discharge_idx[0]: s + discharge_idx[-1]]
+            v_seg = v_seg[~np.isnan(v_seg)]
+            if len(v_seg) < 10:
+                continue
+            ids.append(len(ids) + 1)
+            curves.append(v_seg)
+            caps.append(float(q_seg.max()) / 1000.0)  # mAh → Ah
+        if len(curves) >= 3:
+            return ids, curves, caps, "Tongji/KIT cell", f"Tongji/KIT CSV — {len(curves)} discharge cycles (NCA/NCM)."
+
+    # --- RWTH Aachen / TEMPEST format ---
+    # Columns contain 'volt' and 'curr' (case-insensitive)
+    # TEMPEST: Voltage_V, Current_A | RWTH: Voltage, Current
+    rwth_v = next((col_map[c] for c in cols_lower if "volt" in c), None)
+    rwth_i = next((col_map[c] for c in cols_lower if "curr" in c or c == "i" or c == "i/a" or c == "current[a]"), None)
+    if rwth_v is not None and rwth_i is not None:
+        v_arr = pd.to_numeric(raw_df[rwth_v], errors="coerce").to_numpy(dtype=float)
+        i_arr = pd.to_numeric(raw_df[rwth_i], errors="coerce").fillna(0).to_numpy(dtype=float)
+        # Discharge: current < -0.01 A. Find contiguous discharge blocks.
+        is_discharge = i_arr < -0.01
+        # Detect transitions into discharge (False→True)
+        starts = np.where(~is_discharge[:-1] & is_discharge[1:])[0] + 1
+        ends   = np.where(is_discharge[:-1] & ~is_discharge[1:])[0] + 1
+        if len(starts) == 0:
+            return None
+        # Align starts and ends
+        if len(ends) == 0 or ends[0] < starts[0]:
+            ends = np.append(ends, len(i_arr))
+        if ends[-1] < starts[-1]:
+            ends = np.append(ends, len(i_arr))
+        ids, curves, caps = [], [], []
+        for s, e in zip(starts, ends):
+            v_seg = v_arr[s:e]
+            v_seg = v_seg[~np.isnan(v_seg)]
+            if len(v_seg) < 10:
+                continue
+            ids.append(len(ids) + 1)
+            curves.append(v_seg)
+            # Capacity: integrate current over segment (rough Ah estimate)
+            dt = 1.0  # assume 1s sampling if unknown
+            caps.append(abs(float(np.trapz(i_arr[s:e]))) * dt / 3600.0)
+        if len(curves) >= 3:
+            return ids, curves, caps, "RWTH cell", f"RWTH Aachen CSV — {len(curves)} discharge cycles (NMC)."
+
+    return None
+
 
 def extract_galijatovic_h5(file_bytes):
     """Extract discharge cycles from Galijatovic 2023 HDF5 format."""
@@ -105,6 +197,22 @@ try:
             raw = pd.read_excel(uploaded)
         if raw.empty:
             st.error("The file is empty.")
+            st.stop()
+
+        # Try auto-detect known formats first
+        auto = _try_auto_csv(raw)
+        if auto is not None:
+            ids, curves, caps, battery_name, _desc = auto
+            st.success(f"Format auto-recognized: {_desc}")
+            if len(curves) < 3:
+                st.error("At least three valid discharge cycles required.")
+                st.stop()
+            # Jump straight to results, skip manual mapping UI
+            if st.button("▶ Run Delt-IEt", key="auto_run", type="primary", use_container_width=True):
+                result = analyze_curves(curves, ids, caps, int(window_norm), int(percentile))
+                st.session_state["deltiet_result"] = result
+                st.session_state["deltiet_source"] = uploaded.name
+                st.session_state["deltiet_params"] = (int(window_norm), int(percentile))
             st.stop()
 
         st.subheader("1. Configure columns")
