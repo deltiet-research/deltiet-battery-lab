@@ -612,5 +612,3 @@ if "deltiet_result" in st.session_state:
 - For scientific comparison, keep the same preprocessing and record the parameters.
 """)
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
-
-         
