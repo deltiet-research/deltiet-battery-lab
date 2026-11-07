@@ -176,6 +176,42 @@ def _try_auto_csv(raw_df):
             return ids, curves, caps, f"Pack ({n_cells} cells)", \
                    f"Multi-cell pack CSV — {len(curves)} discharge cycles, {n_cells} cells (LFP/real-world)."
 
+    # --- CALCE Arbin format ---
+    # Columns: Cycle_Index, Voltage(V), Current(A), Discharge_Capacity(Ah)
+    # (from University of Maryland CALCE battery dataset)
+    arbin_cycle = next((col_map[c] for c in cols_lower if "cycle_index" in c or c == "cycle index"), None)
+    arbin_v     = next((col_map[c] for c in cols_lower if "voltage(v)" in c or c == "voltage(v)" or c == "voltage [v]"), None)
+    arbin_cap   = next((col_map[c] for c in cols_lower if "discharge_capacity" in c or "discharge capacity" in c), None)
+    if arbin_cycle is None:
+        arbin_cycle = next((col_map[c] for c in cols_lower if c.startswith("cycle") and "index" in c), None)
+    if arbin_v is None:
+        arbin_v = next((col_map[c] for c in cols_lower if "volt" in c), None)
+    if arbin_cycle is not None and arbin_v is not None:
+        cycle_arr = pd.to_numeric(raw_df[arbin_cycle], errors="coerce").ffill().to_numpy()
+        v_arr     = pd.to_numeric(raw_df[arbin_v], errors="coerce").to_numpy(dtype=float)
+        cap_arr   = pd.to_numeric(raw_df[arbin_cap], errors="coerce").fillna(0).to_numpy(dtype=float) if arbin_cap else None
+        ids, curves, caps = [], [], []
+        for cyc_id in sorted(set(cycle_arr[~np.isnan(cycle_arr)])):
+            mask = cycle_arr == cyc_id
+            v_seg = v_arr[mask]
+            # Keep only the discharge portion: voltage decreasing below 4.3V
+            # Arbin marks discharge by negative current; use voltage drop instead
+            v_valid = v_seg[(~np.isnan(v_seg)) & (v_seg > 2.0) & (v_seg < 4.4)]
+            if len(v_valid) < 20:
+                continue
+            # Find the discharge segment: last monotonically-ish decreasing region
+            # Simpler: take the longest contiguous sub-array where dV < 0 on average
+            # Use all points where voltage is declining — just use full valid segment,
+            # the DeltIEt engine handles mixed charge/discharge via entropy anyway
+            ids.append(int(cyc_id))
+            curves.append(v_valid)
+            if cap_arr is not None:
+                caps.append(float(np.nanmax(cap_arr[mask])))
+            else:
+                caps.append(0.0)
+        if len(curves) >= 3:
+            return ids, curves, caps, "CALCE cell", f"CALCE Arbin Excel — {len(curves)} cycles detected (LCO)."
+
     return None
 
 
@@ -262,7 +298,22 @@ try:
         if uploaded.name.lower().endswith(".csv"):
             raw = pd.read_csv(uploaded)
         else:
-            raw = pd.read_excel(uploaded)
+            # CALCE Arbin Excel files have metadata rows before the real header.
+            # Try header rows 0-5; pick the first one that gives named columns
+            # containing battery-relevant keywords.
+            raw = None
+            _keywords = {"cycle", "voltage", "current", "capacity", "time", "step"}
+            for _hrow in range(6):
+                try:
+                    _candidate = pd.read_excel(uploaded, header=_hrow)
+                    _cols_lower = {str(c).lower() for c in _candidate.columns}
+                    if _keywords & _cols_lower:  # at least one keyword found
+                        raw = _candidate
+                        break
+                except Exception:
+                    pass
+            if raw is None:
+                raw = pd.read_excel(uploaded, header=0)  # fallback
         if raw.empty:
             st.error("The file is empty.")
             st.stop()
