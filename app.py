@@ -215,6 +215,46 @@ def _try_auto_csv(raw_df):
     return None
 
 
+def extract_mendeley_mat(file_bytes, cell_index=0):
+    """Parse Mendeley Dataset5 (MATLAB v7.3 / HDF5).
+
+    Structure: Dataset5/cycles[cell] → Partial_dQ refs (1 per cycle, 121-pt dQ/dV)
+               Dataset5/Capacity[cell] → capacity array (Ah per cycle)
+    """
+    import h5py, tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".mat", delete=False) as tmp:
+        tmp.write(file_bytes)
+        tmp_path = tmp.name
+    try:
+        with h5py.File(tmp_path, 'r') as f:
+            root_key = next(k for k in f.keys() if not k.startswith('#'))
+            ds = f[root_key]
+            n_cells = ds['cycles'].shape[0]
+            ci = min(cell_index, n_cells - 1)
+
+            cyc_ref  = ds['cycles'][ci, 0]
+            cap_ref  = ds['Capacity'][ci, 0]
+            c_grp    = f[cyc_ref]
+            cap_arr  = f[cap_ref][0, :].astype(float)
+
+            pdq_refs = c_grp['Partial_dQ'][:, 0]
+            ids, curves, caps = [], [], []
+            for i, ref in enumerate(pdq_refs):
+                try:
+                    dq = f[ref][0, :].astype(float)
+                    dq = dq[np.isfinite(dq)]
+                    if len(dq) < 20:
+                        continue
+                    ids.append(i + 1)
+                    curves.append(dq)
+                    caps.append(float(cap_arr[i]) if i < len(cap_arr) else np.nan)
+                except Exception:
+                    continue
+        return ids, curves, caps, f"Mendeley-cell{ci+1}", n_cells
+    finally:
+        os.unlink(tmp_path)
+
+
 def extract_galijatovic_h5(file_bytes):
     """Extract discharge cycles from Galijatovic 2023 HDF5 format.
 
@@ -293,10 +333,32 @@ try:
             ids, curves, caps, battery_name = extract_nasa_mat(io.BytesIO(uploaded.getvalue()))
             st.success(f"NASA file recognized: {battery_name} — {len(curves)} discharge cycles.")
         except Exception as _mat_err:
-            # MATLAB v7.3 files are HDF5 — try h5py fallback
+            # MATLAB v7.3 files are HDF5 — try h5py parsers in order
             if any(k in str(_mat_err) for k in ("v7.3", "HDF", "h5py", "Please use HDF")):
-                ids, curves, caps, battery_name = extract_galijatovic_h5(uploaded.getvalue())
-                st.success(f"MATLAB v7.3 (HDF5): cell {battery_name} — {len(curves)} discharge cycles.")
+                _hdf_ok = False
+                # 1st try: Galijatovic / generic HDF5 layout (f['tests'])
+                try:
+                    ids, curves, caps, battery_name = extract_galijatovic_h5(uploaded.getvalue())
+                    st.success(f"MATLAB v7.3 (HDF5): cell {battery_name} — {len(curves)} discharge cycles.")
+                    _hdf_ok = True
+                except Exception:
+                    pass
+                # 2nd try: Mendeley Dataset5 layout (f['Dataset5'])
+                if not _hdf_ok:
+                    try:
+                        ids, curves, caps, battery_name, _n_cells = extract_mendeley_mat(uploaded.getvalue())
+                        st.success(
+                            f"Mendeley Dataset5 (dQ/dV): {battery_name} — {len(curves)} cycles "
+                            f"({_n_cells} cells in file, showing cell 1)."
+                        )
+                        _hdf_ok = True
+                    except Exception as _mend_err:
+                        pass
+                if not _hdf_ok:
+                    raise ValueError(
+                        "Could not parse MATLAB v7.3 file. "
+                        "Supported HDF5 layouts: Galijatovic (f['tests']) and Mendeley Dataset5 (f['Dataset5'])."
+                    )
             else:
                 raise
     elif fname.endswith(".h5") or fname.endswith(".hdf5"):
@@ -459,3 +521,5 @@ if "deltiet_result" in st.session_state:
 - For scientific comparison, keep the same preprocessing and record the parameters.
 """)
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
+
+       
