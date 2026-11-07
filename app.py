@@ -289,8 +289,16 @@ def extract_galijatovic_h5(file_bytes):
 try:
     fname = uploaded.name.lower()
     if fname.endswith(".mat"):
-        ids, curves, caps, battery_name = extract_nasa_mat(io.BytesIO(uploaded.getvalue()))
-        st.success(f"NASA file recognized: {battery_name} — {len(curves)} discharge cycles.")
+        try:
+            ids, curves, caps, battery_name = extract_nasa_mat(io.BytesIO(uploaded.getvalue()))
+            st.success(f"NASA file recognized: {battery_name} — {len(curves)} discharge cycles.")
+        except Exception as _mat_err:
+            # MATLAB v7.3 files are HDF5 — try h5py fallback
+            if any(k in str(_mat_err) for k in ("v7.3", "HDF", "h5py", "Please use HDF")):
+                ids, curves, caps, battery_name = extract_galijatovic_h5(uploaded.getvalue())
+                st.success(f"MATLAB v7.3 (HDF5): cell {battery_name} — {len(curves)} discharge cycles.")
+            else:
+                raise
     elif fname.endswith(".h5") or fname.endswith(".hdf5"):
         ids, curves, caps, battery_name = extract_galijatovic_h5(uploaded.getvalue())
         st.success(f"HDF5 file recognized: cell {battery_name} — {len(curves)} discharge cycles (dynamic protocol).")
@@ -451,6 +459,3 @@ if "deltiet_result" in st.session_state:
 - For scientific comparison, keep the same preprocessing and record the parameters.
 """)
     st.caption("Important limitation: this version preserves the retrospective threshold from the original notebook (percentile computed over the full series). It should not be presented as an online/real-time alert.")
-
-      
-
